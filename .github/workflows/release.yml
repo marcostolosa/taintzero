@@ -36,7 +36,7 @@ jobs:
           cache: pip
 
       - name: Install build dependencies
-        run: python -m pip install -e . pyinstaller
+        run: python -m pip install -e . pyinstaller semgrep
 
       - name: Build executable
         run: >-
@@ -47,12 +47,23 @@ jobs:
 
       - name: Smoke test
         shell: bash
-        run: ./dist/taintzero providers
+        run: >-
+          ./dist/taintzero scan fixtures/repository
+          --offline
+          --rules rules
+          --output reports/release-smoke.json
         if: runner.os != 'Windows'
 
       - name: Smoke test on Windows
-        run: .\dist\taintzero.exe providers
+        run: >-
+          .\dist\taintzero.exe scan fixtures\repository
+          --offline
+          --rules rules
+          --output reports\release-smoke.json
         if: runner.os == 'Windows'
+
+      - name: Verify packaged scanner
+        run: python scripts/verify_fixture_report.py reports/release-smoke.json
 
       - name: Archive Unix executable
         shell: bash

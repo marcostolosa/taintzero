@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
+
+from rich.console import Console
+from rich.progress import (
+    BarColumn,
+    MofNCompleteColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
+from rich.table import Table
 
 from .config import load_config
 from .models import parse_findings
 from .repository import prepare_repository, profile_repository, write_profile
-from .rulesets import COMMUNITY_SOURCES, DOWNLOADABLE_PROFILES, prepare_rulesets
+from .rulesets import (
+    COMMUNITY_SOURCES,
+    DOWNLOADABLE_PROFILES,
+    prepare_rulesets,
+    sources_for_profile,
+)
 from .semgrep_runner import run_semgrep
 from .triage import triage_finding
 
@@ -26,6 +42,9 @@ PROVIDERS = [
     ("vllm", "nenhuma; local"),
     ("custom_openai", "definida pelo usuário"),
 ]
+
+console = Console()
+error_console = Console(stderr=True)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -88,17 +107,25 @@ def main() -> None:
     args = _parser().parse_args()
     try:
         if args.command == "providers":
+            table = Table(title="Provedores LLM", header_style="bold cyan")
+            table.add_column("Provedor", style="bold")
+            table.add_column("Credencial")
             for provider, credential in PROVIDERS:
-                print(f"{provider:<16} {credential}")
+                table.add_row(provider, credential)
+            console.print(table)
             return
         if args.command == "rules":
             _rules(args)
             return
         if args.command == "scan":
             configs = _rule_configs(args)
-            report = run_semgrep(args.target, configs)
+            report = _scan_with_progress(args.target, configs)
             _write_json(args.output, report)
-            print(f"{len(report.get('results', []))} achado(s) em {args.output}")
+            console.print(
+                "[bold green]Concluído[/]",
+                f"{len(report.get('results', []))} achado(s) em",
+                args.output,
+            )
             return
         if args.command == "analyze-repo":
             _analyze_repository(args)
@@ -106,7 +133,7 @@ def main() -> None:
         if args.command == "triage":
             _triage(args)
     except (OSError, RuntimeError, ValueError) as exc:
-        print(f"erro: {exc}", file=sys.stderr)
+        error_console.print("[bold red]Erro:[/]", str(exc))
         raise SystemExit(2) from exc
 
 
@@ -120,15 +147,17 @@ def _triage(args: argparse.Namespace) -> None:
     report = json.loads(args.report.read_text(encoding="utf-8"))
     findings = parse_findings(report)[: config.analysis.max_findings]
     enriched: list[dict[str, Any]] = []
-    for finding in findings:
-        item = finding.to_dict()
-        try:
-            item["ai_triage"] = triage_finding(config, args.project_root, finding)
-            item["ai_status"] = "completed"
-        except RuntimeError as exc:
-            item["ai_status"] = "error"
-            item["ai_error"] = str(exc)
-        enriched.append(item)
+    with _determinate_progress("Triagem por LLM", len(findings)) as (progress, task):
+        for finding in findings:
+            item = finding.to_dict()
+            try:
+                item["ai_triage"] = triage_finding(config, args.project_root, finding)
+                item["ai_status"] = "completed"
+            except RuntimeError as exc:
+                item["ai_status"] = "error"
+                item["ai_error"] = str(exc)
+            enriched.append(item)
+            progress.advance(task)
 
     output = {
         "schema_version": "1.0",
@@ -138,16 +167,21 @@ def _triage(args: argparse.Namespace) -> None:
         "findings": enriched,
     }
     _write_json(args.output, output)
-    print(f"{len(enriched)} achado(s) processado(s) em {args.output}")
+    console.print(
+        "[bold green]Triagem concluída[/]",
+        f"{len(enriched)} achado(s) processado(s) em",
+        args.output,
+    )
 
 
 def _analyze_repository(args: argparse.Namespace) -> None:
-    repository, remote = prepare_repository(
-        args.repository,
-        args.workspace,
-        revision=args.revision,
-        refresh=args.refresh,
-    )
+    with console.status("[cyan]Preparando repositório...", spinner="line"):
+        repository, remote = prepare_repository(
+            args.repository,
+            args.workspace,
+            revision=args.revision,
+            refresh=args.refresh,
+        )
     profile = profile_repository(repository, args.repository, remote)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     profile_path = args.output_dir / "repository-profile.json"
@@ -156,12 +190,14 @@ def _analyze_repository(args: argparse.Namespace) -> None:
     configs = _rule_configs(args)
 
     report_path = args.output_dir / "semgrep.json"
-    report = run_semgrep(repository, configs)
+    report = _scan_with_progress(repository, configs)
     _write_json(report_path, report)
-    print(
-        f"repositório preparado em {repository}; "
-        f"{len(report.get('results', []))} achado(s); perfil em {profile_path}"
+    console.print(
+        "[bold green]Análise concluída[/]",
+        f"{len(report.get('results', []))} achado(s)",
     )
+    console.print("Repositório:", repository)
+    console.print("Perfil:", profile_path)
 
     if args.llm_config:
         _triage(
@@ -183,7 +219,7 @@ def _rule_configs(args: argparse.Namespace) -> list[str | Path]:
             configs.append("auto")
     elif profile in DOWNLOADABLE_PROFILES:
         configs.extend(
-            prepare_rulesets(
+            _prepare_rulesets_with_progress(
                 profile,
                 args.rules_cache,
                 refresh=args.refresh_rules,
@@ -201,12 +237,81 @@ def _rule_configs(args: argparse.Namespace) -> list[str | Path]:
 
 def _rules(args: argparse.Namespace) -> None:
     if args.rules_command == "list":
-        print(f"{'semgrep':<24} https://github.com/semgrep/semgrep-rules")
+        table = Table(title="Fontes de regras", header_style="bold cyan")
+        table.add_column("Fonte", style="bold")
+        table.add_column("Repositório")
+        table.add_row("semgrep", "https://github.com/semgrep/semgrep-rules")
         for source in COMMUNITY_SOURCES:
-            print(f"{source.name:<24} {source.repository.removesuffix('.git')}")
+            table.add_row(source.name, source.repository.removesuffix(".git"))
+        console.print(table)
         return
-    configs = prepare_rulesets(args.profile, args.cache, refresh=args.refresh)
-    print(f"{len(configs)} fonte(s) preparadas em {args.cache.resolve()}")
+    configs = _prepare_rulesets_with_progress(args.profile, args.cache, refresh=args.refresh)
+    console.print(
+        "[bold green]Rulesets preparados[/]",
+        f"{len(configs)} fonte(s) em",
+        args.cache.resolve(),
+    )
+
+
+def _prepare_rulesets_with_progress(
+    profile: str,
+    cache: Path,
+    *,
+    refresh: bool = False,
+    offline: bool = False,
+) -> list[Path]:
+    total = len(sources_for_profile(profile))
+    with _determinate_progress("Preparando rulesets", total) as (progress, task):
+        return prepare_rulesets(
+            profile,
+            cache,
+            refresh=refresh,
+            offline=offline,
+            progress=lambda completed, _total, name: progress.update(
+                task,
+                completed=completed,
+                description=f"Rulesets: {name}",
+            ),
+        )
+
+
+def _scan_with_progress(target: Path, configs: list[str | Path]) -> dict[str, Any]:
+    with Progress(
+        SpinnerColumn("line", style="cyan"),
+        TextColumn("[progress.description]{task.description}"),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Executando Semgrep", total=None)
+        report = run_semgrep(target, configs)
+        progress.update(task, description="Semgrep concluído")
+        return report
+
+
+def _determinate_progress(description: str, total: int) -> _ProgressContext:
+    progress = Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        MofNCompleteColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    )
+    task = progress.add_task(description, total=total)
+    return _ProgressContext(progress, task)
+
+
+class _ProgressContext:
+    def __init__(self, progress: Progress, task: int) -> None:
+        self.progress = progress
+        self.task = task
+
+    def __enter__(self) -> tuple[Progress, int]:
+        self.progress.start()
+        return self.progress, self.task
+
+    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        self.progress.stop()
 
 
 def _write_json(path: Path, value: Any) -> None:

@@ -41,6 +41,12 @@ def run_semgrep(target: Path, rules: Path | str | Sequence[Path | str]) -> dict[
         detail = process.stderr.strip() or process.stdout.strip() or "erro desconhecido"
         raise SemgrepError(f"Semgrep falhou ({process.returncode}): {detail}")
     try:
-        return json.loads(process.stdout)
+        report = json.loads(process.stdout)
     except json.JSONDecodeError as exc:
         raise SemgrepError("Semgrep não retornou JSON válido") from exc
+    errors = report.get("errors", [])
+    if errors:
+        first = errors[0]
+        detail = first.get("message") if isinstance(first, dict) else str(first)
+        raise SemgrepError(f"Semgrep reportou {len(errors)} erro(s): {detail}")
+    return report

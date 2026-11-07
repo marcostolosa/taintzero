@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -69,6 +71,8 @@ COMMUNITY_SOURCES = (
 )
 
 DOWNLOADABLE_PROFILES = ("semgrep-all", "community-top10", "full")
+ProgressCallback = Callable[[int, int, str], None]
+PRO_ENGINE_LANGUAGES = {"apex", "elixir"}
 
 
 def sources_for_profile(profile: str) -> tuple[RuleSource, ...]:
@@ -87,11 +91,12 @@ def prepare_rulesets(
     *,
     refresh: bool = False,
     offline: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> list[Path]:
     sources = sources_for_profile(profile)
     cache = cache.resolve()
     configs: list[Path] = []
-    for source in sources:
+    for index, source in enumerate(sources, start=1):
         source_dir = cache / "sources" / source.name
         config_dir = cache / "configs" / source.name
         if offline:
@@ -104,6 +109,8 @@ def prepare_rulesets(
             if refresh or not _cache_ready(config_dir):
                 _compile_source(source, source_dir, config_dir)
         configs.append(config_dir)
+        if progress is not None:
+            progress(index, len(sources), source.name)
     return configs
 
 
@@ -144,8 +151,9 @@ def _compile_source(
         _remove_within(config_dir, config_dir.parent)
     config_dir.mkdir(parents=True)
     copied = 0
+    discovered = 0
     skipped = 0
-    platform_incompatible: list[str] = []
+    unavailable_rule_ids: list[str] = []
     for candidate in sorted((*source_dir.rglob("*.yml"), *source_dir.rglob("*.yaml"))):
         if candidate.is_symlink() or not candidate.is_file():
             continue
@@ -156,13 +164,23 @@ def _compile_source(
             continue
         if not any(isinstance(document, dict) and isinstance(document.get("rules"), list) for document in documents):
             continue
-        if os.name == "nt" and _contains_join_rule(documents):
-            platform_incompatible.append(str(candidate.relative_to(source_dir)))
+        discovered += 1
+        documents, removed = _filter_unavailable_rules(documents)
+        unavailable_rule_ids.extend(removed)
+        if not any(
+            isinstance(document, dict) and document.get("rules") for document in documents
+        ):
             continue
         copied += 1
         suffix = candidate.suffix.lower()
         output = config_dir / f"{copied:05d}-{candidate.stem}{suffix}"
-        shutil.copyfile(candidate, output)
+        if removed:
+            output.write_text(
+                yaml.safe_dump_all(documents, sort_keys=False, allow_unicode=True),
+                encoding="utf-8",
+            )
+        else:
+            shutil.copyfile(candidate, output)
     if copied == 0:
         raise RulesetError(f"nenhum arquivo de regras válido encontrado em {source.repository}")
 
@@ -181,11 +199,11 @@ def _compile_source(
     metadata = {
         "source": source.repository,
         "commit": _git_commit(source_dir),
-        "discovered_rule_files": copied,
+        "discovered_rule_files": discovered,
         "rule_files": copied - len(incompatible),
         "invalid_yaml_files": skipped,
         "incompatible_rule_files": incompatible,
-        "platform_incompatible_rule_files": platform_incompatible,
+        "unavailable_rule_ids": unavailable_rule_ids,
     }
     (config_dir / "source.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
@@ -250,6 +268,27 @@ def _contains_join_rule(documents: list[object]) -> bool:
     )
 
 
+def _filter_unavailable_rules(documents: list[object]) -> tuple[list[object], list[str]]:
+    removed: list[str] = []
+    for document in documents:
+        if not isinstance(document, dict) or not isinstance(document.get("rules"), list):
+            continue
+        available: list[object] = []
+        for rule in document["rules"]:
+            if not isinstance(rule, dict):
+                available.append(rule)
+                continue
+            languages = {str(language).lower() for language in rule.get("languages", [])}
+            requires_pro = bool(languages & PRO_ENGINE_LANGUAGES)
+            broken_join_on_windows = os.name == "nt" and rule.get("mode") == "join"
+            if requires_pro or broken_join_on_windows:
+                removed.append(str(rule.get("id", "unknown")))
+            else:
+                available.append(rule)
+        document["rules"] = available
+    return documents, removed
+
+
 def _cache_ready(directory: Path) -> bool:
     return _has_rule_files(directory) and (directory / "source.json").is_file()
 
@@ -259,4 +298,9 @@ def _remove_within(path: Path, parent: Path) -> None:
     resolved_parent = parent.resolve()
     if resolved.parent != resolved_parent:
         raise RulesetError(f"recusa ao remover caminho fora do cache: {resolved}")
-    shutil.rmtree(resolved)
+    shutil.rmtree(resolved, onerror=_make_writable_and_retry)
+
+
+def _make_writable_and_retry(function: Callable[[str], object], path: str, _error: object) -> None:
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    function(path)

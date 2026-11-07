@@ -14,6 +14,9 @@
 O Semgrep produz os achados primários. A LLM classifica evidências, registra pré-condições, sugere
 correções e indica ajustes nas regras sem modificar o relatório original.
 
+A CLI usa Rich para tabelas, status e progresso. Porcentagens são exibidas somente quando existe
+um total mensurável. Etapas internas do Semgrep mostram atividade e tempo, sem estimativas falsas.
+
 ## Recursos
 
 - repositórios locais e Git remotos;
@@ -234,8 +237,13 @@ taintzero providers
 python -m pytest -q
 ruff check src tests scripts fixtures
 semgrep --test --config rules tests
+taintzero rules sync --profile full --refresh
+taintzero analyze-repo fixtures/repository --rules-profile full --offline --output-dir reports/full
+python scripts/verify_full_report.py reports/full/semgrep.json
 ```
 
-O CI executa a suíte em Linux e Windows com Python 3.11 e 3.13.
+O CI executa testes unitários e de integração em Linux e Windows, baixa as 11 fontes, valida o
+perfil `full` e rejeita relatórios que contenham erros internos do Semgrep. A action de release
+executa um scan real com cada binário empacotado.
 
 Detalhes do pipeline estão em [docs/architecture.md](docs/architecture.md).
