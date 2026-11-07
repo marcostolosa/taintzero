@@ -181,7 +181,7 @@ taintzero providers
 
 ```bash
 python -m pytest -q
-ruff check src tests scripts
+ruff check src tests scripts fixtures
 semgrep --test --config rules tests
 ```
 

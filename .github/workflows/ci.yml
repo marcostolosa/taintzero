@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -32,14 +32,14 @@ jobs:
         run: python -m pytest -q
 
       - name: Run lint
-        run: ruff check src tests scripts
+        run: ruff check src tests scripts fixtures
 
       - name: Test Semgrep rules
         run: semgrep --test --config rules tests
 
       - name: Test repository workflow
         run: >-
-          taintzero analyze-repo tests/fixtures
+          taintzero analyze-repo fixtures/repository
           --offline
           --rules rules
           --output-dir reports/ci
