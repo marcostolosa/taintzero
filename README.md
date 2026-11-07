@@ -18,7 +18,7 @@ correções e indica ajustes nas regras sem modificar o relatório original.
 
 - repositórios locais e Git remotos;
 - detecção de linguagens, frameworks e manifests;
-- regras do Semgrep Registry e regras locais;
+- regras oficiais, comunitárias, do Semgrep Registry e locais;
 - triagem estruturada por provedores comerciais ou modelos locais;
 - redação de credenciais antes do envio de código;
 - execução em Linux e Windows.
@@ -30,6 +30,10 @@ correções e indica ajustes nas regras sem modificar o relatório original.
 - Git para repositórios remotos.
 
 ## Instalação
+
+Executáveis para Windows, Linux e macOS são anexados a cada
+[GitHub Release](https://github.com/marcostolosa/taintzero/releases). Git e Semgrep continuam sendo
+dependências externas. No macOS, o binário não é assinado.
 
 ### Windows
 
@@ -70,8 +74,55 @@ taintzero analyze-repo https://github.com/org/projeto.git \
 O clone remoto é raso, não interativo e armazenado em `.taintzero/repos`. Use `--refresh` para
 recriá-lo.
 
-Por padrão, o comando usa `--config auto` e inclui `rules/` quando o diretório existe. Para impedir
-consultas ao Semgrep Registry, use regras locais:
+Por padrão, o comando usa `--config auto` e inclui `rules/` quando o diretório existe.
+
+### Rulesets
+
+O parâmetro `--rules-profile` controla a origem das regras:
+
+| Perfil | Conteúdo |
+| --- | --- |
+| `auto` | seleção do Semgrep Registry baseada no repositório |
+| `local` | diretório `rules/` ou caminhos passados com `--rules` |
+| `semgrep-all` | todas as regras Community Edition de `semgrep/semgrep-rules` |
+| `community-top10` | 10 coleções comunitárias classificadas por estrelas no GitHub |
+| `full` | `semgrep-all` e `community-top10` |
+
+Baixar e analisar com o conjunto completo:
+
+```bash
+taintzero analyze-repo /srv/codigo/projeto \
+  --rules-profile full \
+  --output-dir reports/projeto
+```
+
+As fontes são clonadas com profundidade 1 em `.taintzero/rulesets`. Somente YAMLs com uma lista
+Semgrep `rules` são copiados para o cache de execução. O commit e a contagem de arquivos ficam em
+`source.json`. Arquivos incompatíveis com a versão instalada do Semgrep são omitidos e registrados
+no mesmo manifesto.
+
+Preparar o cache sem iniciar uma análise:
+
+```bash
+taintzero rules sync --profile full
+taintzero rules list
+```
+
+Use `--refresh-rules` durante a análise ou `--refresh` em `rules sync` para atualizar as fontes.
+Para usar o cache sem rede:
+
+```bash
+taintzero analyze-repo /srv/codigo/projeto \
+  --rules-profile full \
+  --offline \
+  --output-dir reports/projeto
+```
+
+As dez fontes comunitárias foram selecionadas em 7 de novembro de 2026 entre repositórios que
+publicam coleções de regras, por número de estrelas no GitHub. Licenças e manutenção pertencem a
+cada fonte. A lista está versionada no código e não muda durante a execução.
+
+Para usar apenas regras locais:
 
 ```bash
 taintzero analyze-repo /srv/codigo/projeto \
@@ -174,7 +225,7 @@ taintzero providers
 
 - Semgrep Community Edition não oferece análise completa entre arquivos;
 - detecção de frameworks depende de manifests e sinais estáticos;
-- `--config auto` requer acesso ao Semgrep Registry;
+- `auto` requer acesso ao Semgrep Registry e os perfis baixáveis requerem Git no primeiro uso;
 - a triagem depende da qualidade da regra, do contexto e do modelo selecionado.
 
 ## Testes

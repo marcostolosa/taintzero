@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+          - os: macos-14
+            platform: macos-arm64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install build dependencies
+        run: python -m pip install -e . pyinstaller
+
+      - name: Build executable
+        run: >-
+          pyinstaller --clean --noconfirm --onefile
+          --name taintzero
+          --collect-all litellm
+          packaging/taintzero_entry.py
+
+      - name: Smoke test
+        shell: bash
+        run: ./dist/taintzero providers
+        if: runner.os != 'Windows'
+
+      - name: Smoke test on Windows
+        run: .\dist\taintzero.exe providers
+        if: runner.os == 'Windows'
+
+      - name: Archive Unix executable
+        shell: bash
+        run: tar -czf "dist/taintzero-${{ matrix.platform }}.tar.gz" -C dist taintzero
+        if: runner.os != 'Windows'
+
+      - name: Archive Windows executable
+        shell: pwsh
+        run: Compress-Archive -Path dist\taintzero.exe -DestinationPath dist\taintzero-${{ matrix.platform }}.zip
+        if: runner.os == 'Windows'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: taintzero-${{ matrix.platform }}
+          path: dist/taintzero-${{ matrix.platform }}.*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: taintzero-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          release-assets/*
+          --verify-tag
+          --generate-notes
+          --title "TaintZero ${GITHUB_REF_NAME}"

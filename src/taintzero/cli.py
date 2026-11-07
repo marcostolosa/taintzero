@@ -9,6 +9,7 @@ from typing import Any
 from .config import load_config
 from .models import parse_findings
 from .repository import prepare_repository, profile_repository, write_profile
+from .rulesets import COMMUNITY_SOURCES, DOWNLOADABLE_PROFILES, prepare_rulesets
 from .semgrep_runner import run_semgrep
 from .triage import triage_finding
 
@@ -34,6 +35,14 @@ def _parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("scan", help="Executa o Semgrep e salva o JSON original")
     scan.add_argument("target", type=Path)
     scan.add_argument("--rules", action="append", default=None)
+    scan.add_argument(
+        "--rules-profile",
+        choices=("local", *DOWNLOADABLE_PROFILES),
+        default="local",
+    )
+    scan.add_argument("--rules-cache", type=Path, default=Path(".taintzero/rulesets"))
+    scan.add_argument("--refresh-rules", action="store_true")
+    scan.add_argument("--offline", action="store_true")
     scan.add_argument("--output", type=Path, required=True)
 
     analyze = commands.add_parser(
@@ -44,7 +53,14 @@ def _parser() -> argparse.ArgumentParser:
     analyze.add_argument("--workspace", type=Path, default=Path(".taintzero/repos"))
     analyze.add_argument("--output-dir", type=Path, default=Path("reports/repository"))
     analyze.add_argument("--rules", action="append", default=None)
-    analyze.add_argument("--offline", action="store_true", help="Não consulta o Semgrep Registry")
+    analyze.add_argument(
+        "--rules-profile",
+        choices=("auto", "local", *DOWNLOADABLE_PROFILES),
+        default="auto",
+    )
+    analyze.add_argument("--rules-cache", type=Path, default=Path(".taintzero/rulesets"))
+    analyze.add_argument("--refresh-rules", action="store_true")
+    analyze.add_argument("--offline", action="store_true", help="Não baixa regras nem consulta o Registry")
     analyze.add_argument("--refresh", action="store_true", help="Refaz um clone remoto existente")
     analyze.add_argument("--llm-config", type=Path)
     analyze.add_argument("--allow-cloud-code", action="store_true")
@@ -57,6 +73,14 @@ def _parser() -> argparse.ArgumentParser:
     triage.add_argument("--allow-cloud-code", action="store_true")
 
     commands.add_parser("providers", help="Lista os principais provedores")
+
+    rules = commands.add_parser("rules", help="Baixa e inspeciona coleções de regras")
+    rules_commands = rules.add_subparsers(dest="rules_command", required=True)
+    sync = rules_commands.add_parser("sync", help="Baixa regras para o cache local")
+    sync.add_argument("--profile", choices=DOWNLOADABLE_PROFILES, default="full")
+    sync.add_argument("--cache", type=Path, default=Path(".taintzero/rulesets"))
+    sync.add_argument("--refresh", action="store_true")
+    rules_commands.add_parser("list", help="Lista as fontes do perfil full")
     return parser
 
 
@@ -67,8 +91,12 @@ def main() -> None:
             for provider, credential in PROVIDERS:
                 print(f"{provider:<16} {credential}")
             return
+        if args.command == "rules":
+            _rules(args)
+            return
         if args.command == "scan":
-            report = run_semgrep(args.target, args.rules or [Path("rules")])
+            configs = _rule_configs(args)
+            report = run_semgrep(args.target, configs)
             _write_json(args.output, report)
             print(f"{len(report.get('results', []))} achado(s) em {args.output}")
             return
@@ -125,15 +153,7 @@ def _analyze_repository(args: argparse.Namespace) -> None:
     profile_path = args.output_dir / "repository-profile.json"
     write_profile(profile, profile_path)
 
-    configs: list[str | Path] = []
-    if not args.offline:
-        configs.append("auto")
-    if args.rules:
-        configs.extend(Path(rule) for rule in args.rules)
-    elif Path("rules").is_dir():
-        configs.append(Path("rules").resolve())
-    if not configs:
-        raise ValueError("modo offline exige pelo menos um --rules <arquivo-ou-diretório>")
+    configs = _rule_configs(args)
 
     report_path = args.output_dir / "semgrep.json"
     report = run_semgrep(repository, configs)
@@ -153,6 +173,40 @@ def _analyze_repository(args: argparse.Namespace) -> None:
                 allow_cloud_code=args.allow_cloud_code,
             )
         )
+
+
+def _rule_configs(args: argparse.Namespace) -> list[str | Path]:
+    configs: list[str | Path] = []
+    profile = args.rules_profile
+    if profile == "auto":
+        if not args.offline:
+            configs.append("auto")
+    elif profile in DOWNLOADABLE_PROFILES:
+        configs.extend(
+            prepare_rulesets(
+                profile,
+                args.rules_cache,
+                refresh=args.refresh_rules,
+                offline=args.offline,
+            )
+        )
+    if args.rules:
+        configs.extend(Path(rule).resolve() for rule in args.rules)
+    elif profile in ("auto", "local") and Path("rules").is_dir():
+        configs.append(Path("rules").resolve())
+    if not configs:
+        raise ValueError("nenhuma regra disponível; use --rules ou sincronize um --rules-profile")
+    return configs
+
+
+def _rules(args: argparse.Namespace) -> None:
+    if args.rules_command == "list":
+        print(f"{'semgrep':<24} https://github.com/semgrep/semgrep-rules")
+        for source in COMMUNITY_SOURCES:
+            print(f"{source.name:<24} {source.repository.removesuffix('.git')}")
+        return
+    configs = prepare_rulesets(args.profile, args.cache, refresh=args.refresh)
+    print(f"{len(configs)} fonte(s) preparadas em {args.cache.resolve()}")
 
 
 def _write_json(path: Path, value: Any) -> None:

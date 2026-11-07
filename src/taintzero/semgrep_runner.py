@@ -27,9 +27,18 @@ def run_semgrep(target: Path, rules: Path | str | Sequence[Path | str]) -> dict[
     for config in configs:
         command.extend(["--config", str(config)])
     command.extend(["--json", "--quiet", str(target)])
-    process = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8")
+    environment = os.environ.copy()
+    environment.setdefault("PYTHONUTF8", "1")
+    process = subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=environment,
+    )
     if process.returncode not in (0, 1):
-        detail = process.stderr.strip() or "erro desconhecido"
+        detail = process.stderr.strip() or process.stdout.strip() or "erro desconhecido"
         raise SemgrepError(f"Semgrep falhou ({process.returncode}): {detail}")
     try:
         return json.loads(process.stdout)
