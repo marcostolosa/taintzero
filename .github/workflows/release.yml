@@ -22,7 +22,7 @@ jobs:
             platform: linux-x86_64
           - os: windows-latest
             platform: windows-x86_64
-          - os: macos-14
+          - os: macos-15
             platform: macos-arm64
 
     steps:
@@ -65,7 +65,7 @@ jobs:
         if: runner.os == 'Windows'
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: taintzero-${{ matrix.platform }}
           path: dist/taintzero-${{ matrix.platform }}.*
@@ -81,7 +81,7 @@ jobs:
 
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: taintzero-*
           path: release-assets
