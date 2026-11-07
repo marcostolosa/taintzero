@@ -1,0 +1,30 @@
+rules:
+  - id: taintzero.python.command-injection
+    message: Entrada controlada pelo usuário alcança execução de comando do sistema.
+    severity: ERROR
+    languages: [python]
+    mode: taint
+    metadata:
+      category: security
+      cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command"
+      confidence: HIGH
+    pattern-sources:
+      - pattern-either:
+          - pattern: flask.request.args.get(...)
+          - pattern: flask.request.form.get(...)
+          - pattern: request.args.get(...)
+          - pattern: request.form.get(...)
+          - pattern: input(...)
+    pattern-sanitizers:
+      - pattern-either:
+          - pattern: shlex.quote(...)
+    pattern-sinks:
+      - pattern-either:
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - patterns:
+              - pattern: subprocess.$FUNC(..., shell=True, ...)
+              - metavariable-regex:
+                  metavariable: $FUNC
+                  regex: ^(run|call|Popen|check_call|check_output)$
+

@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install project and scanner
+        run: python -m pip install -e ".[dev]" semgrep
+
+      - name: Run unit tests
+        run: python -m pytest -q
+
+      - name: Run lint
+        run: ruff check src tests scripts
+
+      - name: Test Semgrep rules
+        run: semgrep --test --config rules tests
+
+      - name: Test repository workflow
+        run: >-
+          taintzero analyze-repo tests/fixtures
+          --offline
+          --rules rules
+          --output-dir reports/ci
+
+      - name: Verify repository report
+        run: python scripts/verify_fixture_report.py reports/ci/semgrep.json
