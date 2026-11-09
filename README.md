@@ -229,7 +229,8 @@ Fluxos de atributos entre métodos são conectados por identidade de objeto. Fun
 uma vez têm nós e parâmetros clonados por callsite; helpers internos também são expandidos no mesmo
 contexto, até profundidade 4. Essas arestas recebem confiança `probable`. Recursão, profundidade
 excedida, dispatch interno ambíguo e múltiplas definições aparecem em `diagnostics`, sem fallback
-silencioso para summaries compartilhados.
+silencioso para summaries compartilhados. Definições de atributos em branches comuns são fundidas
+por `phi` antes de cruzar métodos, preservando alternativas tainted e sanitizadas.
 
 Renderizar o grafo opcionalmente com Graphviz:
 

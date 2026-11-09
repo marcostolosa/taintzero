@@ -53,7 +53,10 @@ def test_field_does_not_cross_distinct_instances(tmp_path: Path) -> None:
         ),
     )
 
-    assert analyze_taint(index_python_project(tmp_path)) == []
+    program = index_python_project(tmp_path)
+
+    assert analyze_taint(program) == []
+    assert not any(diagnostic.startswith("heap-") for diagnostic in program.diagnostics)
 
 
 def test_explicit_object_alias_preserves_interprocedural_field(tmp_path: Path) -> None:
@@ -103,7 +106,59 @@ def test_sanitizer_before_field_store_blocks_taint(tmp_path: Path) -> None:
         ),
     )
 
-    assert analyze_taint(index_python_project(tmp_path)) == []
+    program = index_python_project(tmp_path)
+
+    assert analyze_taint(program) == []
+    assert not any(diagnostic.startswith("heap-") for diagnostic in program.diagnostics)
+
+
+def test_heap_phi_connects_branch_definitions_to_method_load(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "class Holder:\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route(flag):\n"
+        "    holder = Holder()\n"
+        "    if flag:\n"
+        "        holder.command = request.args.get('command')\n"
+        "    else:\n"
+        "        holder.command = 'constant'\n"
+        "    holder.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert any(step.node.kind == "phi" for step in findings[0].trace)
+    assert any(step.incoming_edge == "possible_field_store_to_load" for step in findings[0].trace)
+
+
+def test_heap_phi_with_sanitized_branches_is_safe(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "from shlex import quote\n"
+        "class Holder:\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route(flag):\n"
+        "    holder = Holder()\n"
+        "    if flag:\n"
+        "        holder.command = quote(request.args.get('command'))\n"
+        "    else:\n"
+        "        holder.command = 'constant'\n"
+        "    holder.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+
+    assert analyze_taint(program) == []
+    assert not any(diagnostic.startswith("heap-") for diagnostic in program.diagnostics)
 
 
 def test_multiple_setter_calls_are_specialized_by_instance(tmp_path: Path) -> None:
@@ -144,7 +199,10 @@ def test_context_clones_do_not_cross_contaminate_instances(tmp_path: Path) -> No
         ),
     )
 
-    assert analyze_taint(index_python_project(tmp_path)) == []
+    program = index_python_project(tmp_path)
+
+    assert analyze_taint(program) == []
+    assert not any(diagnostic.startswith("heap-") for diagnostic in program.diagnostics)
 
 
 def test_nested_project_call_is_cloned_per_context(tmp_path: Path) -> None:
@@ -225,6 +283,7 @@ def test_recursive_context_expansion_is_blocked_and_diagnosed(tmp_path: Path) ->
 
     program = index_python_project(tmp_path)
 
+    assert analyze_taint(program) == []
     assert "heap-context-recursion:app.normalize" in program.diagnostics
 
 
@@ -258,6 +317,7 @@ def test_context_expansion_depth_is_bounded_and_diagnosed(tmp_path: Path) -> Non
 
     program = index_python_project(tmp_path)
 
+    assert analyze_taint(program) == []
     assert "heap-context-depth-exceeded:app.h4:limit=4" in program.diagnostics
 
 

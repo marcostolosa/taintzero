@@ -246,6 +246,7 @@ class _FunctionBuilder:
             self.node_types.setdefault(node, frozenset((inferred_type,)))
         self.object_ids: dict[str, str] = {}
         self.fields: dict[str, str] = {}
+        self.field_meta: dict[str, tuple[str, str]] = {}
         self.counter = 0
         self.versions: dict[str, int] = {}
         self.created_nodes: list[str] = []
@@ -381,17 +382,22 @@ class _FunctionBuilder:
     ) -> bool:
         before = self.environment.copy()
         before_fields = self.fields.copy()
+        before_field_meta = self.field_meta.copy()
         outcomes: list[dict[str, str]] = []
         field_outcomes: list[dict[str, str]] = []
+        field_meta_outcomes: list[dict[str, tuple[str, str]]] = []
         for branch in branches:
             self.environment = before.copy()
             self.fields = before_fields.copy()
+            self.field_meta = before_field_meta.copy()
             falls_through = self._statements(branch)
             if falls_through or keep_terminated:
                 outcomes.append(self.environment.copy())
                 field_outcomes.append(self.fields.copy())
+                field_meta_outcomes.append(self.field_meta.copy())
         self.environment = before
         self.fields = before_fields
+        self.field_meta = before_field_meta
         if not outcomes:
             return False
         for name in sorted(set().union(*(outcome.keys() for outcome in outcomes))):
@@ -421,6 +427,16 @@ class _FunctionBuilder:
             candidates.discard(None)
             if len(candidates) == 1:
                 self.fields[access_path] = next(iter(candidates))
+                metadata = next(
+                    (
+                        outcome[access_path]
+                        for outcome in field_meta_outcomes
+                        if access_path in outcome
+                    ),
+                    before_field_meta.get(access_path),
+                )
+                if metadata is not None:
+                    self.field_meta[access_path] = metadata
             elif candidates:
                 phi = self._node("phi", node, f"{access_path}#phi")
                 for candidate in sorted(candidates):
@@ -433,6 +449,27 @@ class _FunctionBuilder:
                 if candidate_types:
                     self.node_types[phi] = frozenset(candidate_types)
                 self.fields[access_path] = phi
+                metadata = next(
+                    (
+                        outcome[access_path]
+                        for outcome in field_meta_outcomes
+                        if access_path in outcome
+                    ),
+                    before_field_meta.get(access_path),
+                )
+                if metadata is not None:
+                    receiver, attribute = metadata
+                    self.field_meta[access_path] = metadata
+                    self.program.field_accesses.append(
+                        FieldAccess(
+                            node=phi,
+                            receiver=receiver,
+                            attribute=attribute,
+                            mode="phi",
+                            scope=self.source.symbol,
+                            location=self._location(node),
+                        )
+                    )
         return True
 
     def _assign(self, target: ast.expr, value: str | None) -> None:
@@ -449,6 +486,7 @@ class _FunctionBuilder:
             destination = self._node("field", target, access_path or target.attr)
             if access_path is not None:
                 self.fields[access_path] = destination
+                self.field_meta[access_path] = (receiver, target.attr)
             self.program.field_accesses.append(
                 FieldAccess(
                     node=destination,
@@ -1036,7 +1074,7 @@ def _connect_heap_fields(program: ProgramIR) -> None:
         if context is None:
             continue
         item = (access, find(access.receiver), context)
-        if access.mode == "write":
+        if access.mode in {"write", "phi"}:
             writes.append(item)
         else:
             reads.append(item)
@@ -1050,6 +1088,17 @@ def _connect_heap_fields(program: ProgramIR) -> None:
             and write_receiver == receiver
             and write_root == root_scope
             and write_order < read_order
+        ]
+        grouped: dict[str, list[FieldAccess]] = {}
+        for write in candidates:
+            grouped.setdefault(write.scope, []).append(write)
+        candidates = [
+            write
+            for scope_writes in grouped.values()
+            for write in (
+                [item for item in scope_writes if item.mode == "phi"]
+                or scope_writes
+            )
         ]
         if len(candidates) == 1:
             program.add_edge(
