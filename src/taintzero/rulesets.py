@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from .semgrep_environment import semgrep_environment
+
 
 class RulesetError(RuntimeError):
     pass
@@ -232,8 +234,6 @@ def _semgrep_valid(configs: tuple[Path, ...]) -> bool:
     executable = str(sibling) if sibling.is_file() else shutil.which("semgrep")
     if executable is None:
         raise RulesetError("Semgrep não está no PATH; ele é necessário para validar rulesets")
-    environment = os.environ.copy()
-    environment.setdefault("PYTHONUTF8", "1")
     command = [executable, "scan", "--validate"]
     for config in configs:
         command.extend(["--config", str(config)])
@@ -243,7 +243,7 @@ def _semgrep_valid(configs: tuple[Path, ...]) -> bool:
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=environment,
+        env=semgrep_environment(),
     )
     if process.returncode == 0:
         return True

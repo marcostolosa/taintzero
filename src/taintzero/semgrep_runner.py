@@ -9,6 +9,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from .semgrep_environment import semgrep_environment
+
 
 class SemgrepError(RuntimeError):
     pass
@@ -27,15 +29,13 @@ def run_semgrep(target: Path, rules: Path | str | Sequence[Path | str]) -> dict[
     for config in configs:
         command.extend(["--config", str(config)])
     command.extend(["--json", "--quiet", str(target)])
-    environment = os.environ.copy()
-    environment.setdefault("PYTHONUTF8", "1")
     process = subprocess.run(
         command,
         check=False,
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=environment,
+        env=semgrep_environment(),
     )
     if process.returncode not in (0, 1):
         detail = process.stderr.strip() or process.stdout.strip() or "erro desconhecido"

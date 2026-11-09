@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "taintzero"
-version = "0.2.0"
-description = "Provider-agnostic AI triage for Semgrep taint-analysis findings"
+version = "0.3.0"
+description = "Open-source interprocedural taint analysis with optional dynamic and AI triage"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8,<9", "ruff>=0.8,<1"]
+dev = ["build>=1.2,<2", "pytest>=8,<9", "ruff>=0.8,<1"]
+semgrep = ["semgrep>=1.100,<2"]
 
 [project.scripts]
 taintzero = "taintzero.cli:main"
