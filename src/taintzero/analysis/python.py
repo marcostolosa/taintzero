@@ -273,7 +273,7 @@ class _FunctionBuilder:
         if self.source.binding == "module":
             self.program.module_environments[self.source.module] = self.environment.copy()
 
-    def _statements(self, statements: list[ast.stmt]) -> None:
+    def _statements(self, statements: list[ast.stmt]) -> bool:
         for statement in statements:
             if isinstance(statement, (ast.Assign, ast.AnnAssign)):
                 value = self._expression(statement.value) if statement.value else None
@@ -293,36 +293,59 @@ class _FunctionBuilder:
                 self._assign(statement.target, expression)
             elif isinstance(statement, ast.Return) and statement.value is not None:
                 self.program.add_edge(self._expression(statement.value), self.return_node, "return")
+                return False
+            elif isinstance(statement, ast.Return):
+                return False
+            elif isinstance(statement, ast.Raise):
+                if statement.exc is not None:
+                    self._expression(statement.exc)
+                if statement.cause is not None:
+                    self._expression(statement.cause)
+                return False
             elif isinstance(statement, ast.Expr):
                 self._expression(statement.value)
             elif isinstance(statement, ast.If):
                 self._expression(statement.test)
-                self._branch(statement.body, statement.orelse, statement)
+                if not self._branch(statement.body, statement.orelse, statement):
+                    return False
             elif isinstance(statement, (ast.For, ast.AsyncFor)):
                 iterator = self._expression(statement.iter)
                 self._assign(statement.target, iterator)
-                self._branch(statement.body, statement.orelse, statement)
+                if not self._branch(statement.body, statement.orelse, statement):
+                    return False
             elif isinstance(statement, ast.While):
                 self._expression(statement.test)
-                self._branch(statement.body, statement.orelse, statement)
+                if not self._branch(statement.body, statement.orelse, statement):
+                    return False
             elif isinstance(statement, (ast.With, ast.AsyncWith)):
                 for item in statement.items:
                     value = self._expression(item.context_expr)
                     if item.optional_vars:
                         self._assign(item.optional_vars, value)
-                self._statements(statement.body)
+                if not self._statements(statement.body):
+                    return False
             elif isinstance(statement, ast.Try):
                 branches = [statement.body, *(handler.body for handler in statement.handlers)]
-                self._multi_branch(branches, statement)
+                # Try/except/else/finally needs distinct exceptional and normal successors.
+                # Preserve terminated branch state for finally and stay conservative until the
+                # dedicated CFG represents those edges explicitly.
+                self._multi_branch(branches, statement, keep_terminated=True)
                 self._statements(statement.orelse)
                 self._statements(statement.finalbody)
             elif isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
+        return True
 
-    def _branch(self, left: list[ast.stmt], right: list[ast.stmt], node: ast.AST) -> None:
-        self._multi_branch([left, right], node)
+    def _branch(self, left: list[ast.stmt], right: list[ast.stmt], node: ast.AST) -> bool:
+        return self._multi_branch([left, right], node)
 
-    def _multi_branch(self, branches: list[list[ast.stmt]], node: ast.AST) -> None:
+    def _multi_branch(
+        self,
+        branches: list[list[ast.stmt]],
+        node: ast.AST,
+        *,
+        keep_terminated: bool = False,
+    ) -> bool:
         before = self.environment.copy()
         before_fields = self.fields.copy()
         outcomes: list[dict[str, str]] = []
@@ -330,11 +353,14 @@ class _FunctionBuilder:
         for branch in branches:
             self.environment = before.copy()
             self.fields = before_fields.copy()
-            self._statements(branch)
-            outcomes.append(self.environment.copy())
-            field_outcomes.append(self.fields.copy())
+            falls_through = self._statements(branch)
+            if falls_through or keep_terminated:
+                outcomes.append(self.environment.copy())
+                field_outcomes.append(self.fields.copy())
         self.environment = before
         self.fields = before_fields
+        if not outcomes:
+            return False
         for name in sorted(set().union(*(outcome.keys() for outcome in outcomes))):
             candidates = {outcome.get(name, before.get(name)) for outcome in outcomes}
             candidates.discard(None)
@@ -378,6 +404,7 @@ class _FunctionBuilder:
                 ):
                     self.node_types[phi] = next(iter(candidate_types))
                 self.fields[access_path] = phi
+        return True
 
     def _assign(self, target: ast.expr, value: str | None) -> None:
         if isinstance(target, (ast.Tuple, ast.List)):

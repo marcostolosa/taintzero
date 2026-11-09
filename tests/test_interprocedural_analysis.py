@@ -297,6 +297,65 @@ def test_attribute_phi_with_safe_branches_remains_safe(tmp_path: Path) -> None:
     assert analyze_taint(index_python_project(tmp_path)) == []
 
 
+def test_returned_tainted_branch_does_not_reach_later_sink(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": "import os\n"
+            "from flask import request\n"
+            "def route(flag):\n"
+            "    command = 'constant'\n"
+            "    if flag:\n"
+            "        command = request.args.get('command')\n"
+            "        return command\n"
+            "    os.system(command)\n",
+        },
+    )
+
+    assert analyze_taint(index_python_project(tmp_path)) == []
+
+
+def test_tainted_fallthrough_still_reaches_sink(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": "import os\n"
+            "from flask import request\n"
+            "def route(flag):\n"
+            "    command = request.args.get('command')\n"
+            "    if flag:\n"
+            "        return 'stopped'\n"
+            "    os.system(command)\n",
+        },
+    )
+
+    findings = analyze_taint(index_python_project(tmp_path))
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+
+
+def test_code_after_fully_terminating_if_is_unreachable(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": "import os\n"
+            "from flask import request\n"
+            "def route(flag):\n"
+            "    command = request.args.get('command')\n"
+            "    if flag:\n"
+            "        return 'left'\n"
+            "    else:\n"
+            "        raise RuntimeError('right')\n"
+            "    os.system(command)\n",
+        },
+    )
+
+    program = index_python_project(tmp_path)
+
+    assert analyze_taint(program) == []
+    assert all(call.callee != "os.system" for call in program.calls)
+
+
 def test_partial_project_reports_syntax_error_and_keeps_scanning(tmp_path: Path) -> None:
     _write_files(
         tmp_path,
