@@ -225,10 +225,10 @@ command/code injection, XSS, SQLi, SSRF, path traversal, desserialização inseg
 condicional. A cobertura é por APIs modeladas; essa lista não implica cobertura integral de uma
 categoria ou framework.
 
-Fluxos de atributos entre métodos são conectados quando receiver, callsite e definição são únicos.
-Essas arestas recebem confiança `probable`. Contextos com múltiplos callsites ou definições não são
-combinados por suposição: aparecem em `diagnostics` como `heap-context-ambiguous` ou
-`heap-definitions-ambiguous`.
+Fluxos de atributos entre métodos são conectados por identidade de objeto. Funções folha chamadas
+mais de uma vez têm nós e parâmetros clonados por callsite para impedir contaminação entre
+instâncias. Essas arestas recebem confiança `probable`; chamadas internas ainda não clonáveis e
+múltiplas definições aparecem em `diagnostics`, sem combinação especulativa.
 
 Renderizar o grafo opcionalmente com Graphviz:
 
@@ -324,7 +324,8 @@ taintzero providers
 
 - a cobertura do motor nativo depende das construções Python e APIs atualmente modeladas;
 - dispatch altamente dinâmico e extensões nativas podem exigir modelos adicionais;
-- heap entre métodos ainda exige contexto e definição únicos; ambiguidades são diagnosticadas;
+- heap multi-call é especializado para funções folha; chamadas internas e recursão são
+  diagnosticadas até a expansão contextual completa;
 - detecção de frameworks depende de manifests e sinais estáticos;
 - `auto` requer acesso ao Semgrep Registry e os perfis baixáveis requerem Git no primeiro uso;
 - a triagem depende da qualidade da regra, do contexto e do modelo selecionado.

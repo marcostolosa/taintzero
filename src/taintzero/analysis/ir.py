@@ -65,6 +65,7 @@ class FunctionIR:
     parameter_nodes: tuple[str, ...]
     return_node: str
     binding: str | None = None
+    node_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ class CallSite:
     keyword_values: tuple[tuple[str, object], ...] = ()
     receiver_node: str | None = None
     possible_dispatch: bool = False
+    context_function: str | None = None
 
     @property
     def argument_nodes(self) -> tuple[str, ...]:

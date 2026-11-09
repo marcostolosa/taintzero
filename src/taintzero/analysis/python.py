@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import ast
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .ir import CallSite, ClassIR, FieldAccess, FlowNode, FunctionIR, Location, ProgramIR
+from .ir import (
+    CallSite,
+    ClassIR,
+    FieldAccess,
+    FlowEdge,
+    FlowNode,
+    FunctionIR,
+    Location,
+    ObjectAlias,
+    ProgramIR,
+)
 
 
 class PythonAnalysisError(RuntimeError):
@@ -88,6 +98,7 @@ def index_python_project(root: Path) -> ProgramIR:
     for source in sources:
         _FunctionBuilder(program, source).build()
 
+    _specialize_heap_contexts(program)
     _connect_calls(program)
     _connect_heap_fields(program)
     if syntax_errors:
@@ -236,6 +247,7 @@ class _FunctionBuilder:
         self.fields: dict[str, str] = {}
         self.counter = 0
         self.versions: dict[str, int] = {}
+        self.created_nodes: list[str] = []
         self.return_node = self._node("return", source.node, "return", source.symbol)
 
     def build(self) -> None:
@@ -275,6 +287,10 @@ class _FunctionBuilder:
             binding=self.source.binding,
         )
         self._statements(self.source.node.body)
+        function = self.program.functions[self.source.symbol]
+        self.program.functions[self.source.symbol] = replace(
+            function, node_ids=tuple(self.created_nodes)
+        )
         self.program.possible_types.update(self.node_types)
         self.program.inferred_types.update(
             {
@@ -674,9 +690,11 @@ class _FunctionBuilder:
             f"{location.path}:{location.line}:{location.col}:"
             f"{self.source.symbol}:{kind}:{self.counter}"
         )
-        return self.program.add_node(
+        identifier = self.program.add_node(
             FlowNode(id=identifier, kind=kind, label=label, location=location, symbol=symbol)
         )
+        self.created_nodes.append(identifier)
+        return identifier
 
     def _location(self, node: ast.AST) -> Location:
         return Location.from_ast(self.program.root, self.source.path, node)
@@ -691,15 +709,167 @@ def _expression_name(node: ast.AST) -> str | None:
     return None
 
 
+def _call_target(call: CallSite) -> str:
+    return call.context_function or call.callee
+
+
+def _specialize_heap_contexts(program: ProgramIR) -> None:
+    """Clone leaf function flow graphs when field state needs multiple call contexts."""
+    diagnostics = set(program.diagnostics)
+    field_scopes = {access.scope for access in program.field_accesses}
+    incoming: dict[str, list[CallSite]] = {}
+    for call in program.calls:
+        if call.callee in program.functions and not call.possible_dispatch:
+            incoming.setdefault(call.callee, []).append(call)
+
+    targets = [
+        symbol
+        for symbol in sorted(field_scopes)
+        if len(incoming.get(symbol, ())) > 1
+    ]
+    for symbol in targets:
+        function = program.functions[symbol]
+        inner_calls = [call for call in program.calls if call.scope == symbol]
+        if any(call.callee in program.functions for call in inner_calls):
+            diagnostics.add(f"heap-context-clone-unsupported:{symbol}:nested-call")
+            continue
+        original_nodes = set(function.node_ids)
+        internal_edges = [
+            edge
+            for edge in program.edges
+            if edge.source in original_nodes and edge.target in original_nodes
+        ]
+        internal_aliases = [
+            alias
+            for alias in program.object_aliases
+            if alias.source in original_nodes and alias.target in original_nodes
+        ]
+        field_accesses = [
+            access for access in program.field_accesses if access.scope == symbol
+        ]
+
+        updated_incoming: dict[int, CallSite] = {}
+        cloned_calls: list[CallSite] = []
+        cloned_edges: list[FlowEdge] = []
+        cloned_aliases: list[ObjectAlias] = []
+        cloned_accesses: list[FieldAccess] = []
+        for ordinal, call in enumerate(incoming[symbol], start=1):
+            context_id = (
+                f"{call.location.path}:{call.location.line}:{call.location.col}:{ordinal}"
+            )
+            context_symbol = f"{symbol}@{context_id}"
+            node_map: dict[str, str] = {}
+            for node_id in function.node_ids:
+                original = program.nodes[node_id]
+                cloned_id = f"{node_id}@call:{context_id}"
+                cloned_symbol = original.symbol
+                if cloned_symbol and cloned_symbol.startswith(symbol):
+                    cloned_symbol = context_symbol + cloned_symbol[len(symbol) :]
+                program.nodes[cloned_id] = replace(
+                    original,
+                    id=cloned_id,
+                    symbol=cloned_symbol,
+                )
+                node_map[node_id] = cloned_id
+                if node_id in program.inferred_types:
+                    program.inferred_types[cloned_id] = program.inferred_types[node_id]
+                if node_id in program.possible_types:
+                    program.possible_types[cloned_id] = program.possible_types[node_id]
+
+            program.functions[context_symbol] = replace(
+                function,
+                symbol=context_symbol,
+                parameter_nodes=tuple(node_map[node] for node in function.parameter_nodes),
+                return_node=node_map[function.return_node],
+                node_ids=tuple(node_map[node] for node in function.node_ids),
+            )
+            updated_incoming[id(call)] = replace(call, context_function=context_symbol)
+            cloned_edges.extend(
+                FlowEdge(
+                    source=node_map[edge.source],
+                    target=node_map[edge.target],
+                    kind=edge.kind,
+                    blocked_taints=edge.blocked_taints,
+                )
+                for edge in internal_edges
+            )
+            cloned_aliases.extend(
+                ObjectAlias(
+                    source=node_map[alias.source],
+                    target=node_map[alias.target],
+                    kind=alias.kind,
+                )
+                for alias in internal_aliases
+            )
+            cloned_accesses.extend(
+                replace(
+                    access,
+                    node=node_map[access.node],
+                    receiver=node_map[access.receiver],
+                    scope=context_symbol,
+                )
+                for access in field_accesses
+            )
+            cloned_calls.extend(
+                replace(
+                    inner,
+                    scope=context_symbol,
+                    result_node=node_map[inner.result_node],
+                    positional_arguments=tuple(
+                        node_map[node] for node in inner.positional_arguments
+                    ),
+                    keyword_arguments=tuple(
+                        (name, node_map[node]) for name, node in inner.keyword_arguments
+                    ),
+                    receiver_node=(
+                        node_map[inner.receiver_node] if inner.receiver_node else None
+                    ),
+                )
+                for inner in inner_calls
+            )
+
+        program.edges = [
+            edge
+            for edge in program.edges
+            if edge.source not in original_nodes and edge.target not in original_nodes
+        ]
+        program.edges.extend(cloned_edges)
+        program.object_aliases = [
+            alias
+            for alias in program.object_aliases
+            if alias.source not in original_nodes and alias.target not in original_nodes
+        ]
+        program.object_aliases.extend(cloned_aliases)
+        program.field_accesses = [
+            access for access in program.field_accesses if access.scope != symbol
+        ]
+        program.field_accesses.extend(cloned_accesses)
+        program.calls = [
+            updated_incoming.get(id(call), call)
+            for call in program.calls
+            if call.scope != symbol
+        ]
+        program.calls.extend(cloned_calls)
+        del program.functions[symbol]
+        for node_id in function.node_ids:
+            program.nodes.pop(node_id, None)
+            program.inferred_types.pop(node_id, None)
+            program.possible_types.pop(node_id, None)
+    program.diagnostics = tuple(sorted(diagnostics))
+
+
 def _connect_calls(program: ProgramIR) -> None:
     incoming = Counter(
-        call.callee for call in program.calls if call.callee in program.functions
+        _call_target(call)
+        for call in program.calls
+        if _call_target(call) in program.functions
     )
     for call in program.calls:
-        function = program.functions.get(call.callee)
+        target = _call_target(call)
+        function = program.functions.get(target)
         if function is None:
             continue
-        unique_context = incoming[call.callee] == 1 and not call.possible_dispatch
+        unique_context = incoming[target] == 1 and not call.possible_dispatch
         edge_prefix = "possible_" if call.possible_dispatch else ""
         parameter_offset = 0
         if (
@@ -755,8 +925,9 @@ def _connect_heap_fields(program: ProgramIR) -> None:
     diagnostics = set(program.diagnostics)
     incoming_calls: dict[str, list[CallSite]] = {}
     for call in program.calls:
-        if call.callee in program.functions:
-            incoming_calls.setdefault(call.callee, []).append(call)
+        target = _call_target(call)
+        if target in program.functions:
+            incoming_calls.setdefault(target, []).append(call)
     unique_calls = {
         symbol: calls[0]
         for symbol, calls in incoming_calls.items()

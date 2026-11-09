@@ -106,7 +106,7 @@ def test_sanitizer_before_field_store_blocks_taint(tmp_path: Path) -> None:
     assert analyze_taint(index_python_project(tmp_path)) == []
 
 
-def test_multiple_setter_calls_do_not_merge_instances(tmp_path: Path) -> None:
+def test_multiple_setter_calls_are_specialized_by_instance(tmp_path: Path) -> None:
     _write_app(
         tmp_path,
         _holder_program(
@@ -119,11 +119,58 @@ def test_multiple_setter_calls_do_not_merge_instances(tmp_path: Path) -> None:
     )
 
     program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
 
-    assert analyze_taint(program) == []
-    assert all(edge.kind != "possible_field_store_to_load" for edge in program.edges)
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert findings[0].confidence == "probable"
+    assert len(
+        [
+            function
+            for function in program.functions
+            if function.startswith("app.Holder.set_command@")
+        ]
+    ) == 2
+
+
+def test_context_clones_do_not_cross_contaminate_instances(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        _holder_program(
+            "    first = Holder()\n"
+            "    second = Holder()\n"
+            "    first.set_command('constant')\n"
+            "    second.set_command(request.args.get('command'))\n"
+            "    first.run()\n"
+        ),
+    )
+
+    assert analyze_taint(index_python_project(tmp_path)) == []
+
+
+def test_nested_project_call_is_diagnosed_before_context_cloning(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "def normalize(value):\n"
+        "    return value\n"
+        "class Holder:\n"
+        "    def set_command(self, value):\n"
+        "        self.command = normalize(value)\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route():\n"
+        "    first = Holder()\n"
+        "    second = Holder()\n"
+        "    first.set_command(request.args.get('command'))\n"
+        "    second.set_command('constant')\n"
+        "    first.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+
     assert any(
-        diagnostic.startswith("heap-context-ambiguous:app.Holder.set_command:")
+        diagnostic == "heap-context-clone-unsupported:app.Holder.set_command:nested-call"
         for diagnostic in program.diagnostics
     )
 
