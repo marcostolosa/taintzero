@@ -208,6 +208,7 @@ def analyze_taint(
             all_traces = (trace, *(requirement.trace for requirement in requirements))
             if any(
                 step.incoming_edge == "external_call"
+                or (step.incoming_edge or "").startswith("possible_")
                 for current_trace in all_traces
                 for step in current_trace
             ):

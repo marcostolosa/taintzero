@@ -356,6 +356,38 @@ def test_code_after_fully_terminating_if_is_unreachable(tmp_path: Path) -> None:
     assert all(call.callee != "os.system" for call in program.calls)
 
 
+def test_phi_dispatches_every_possible_receiver_type(tmp_path: Path) -> None:
+    _write_files(
+        tmp_path,
+        {
+            "app.py": "import os\n"
+            "from flask import request\n"
+            "class ShellExecutor:\n"
+            "    def run(self, value):\n"
+            "        os.system(value)\n"
+            "class Logger:\n"
+            "    def run(self, value):\n"
+            "        print(value)\n"
+            "def route(flag):\n"
+            "    if flag:\n"
+            "        executor = ShellExecutor()\n"
+            "    else:\n"
+            "        executor = Logger()\n"
+            "    executor.run(request.args.get('command'))\n",
+        },
+    )
+
+    program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
+
+    assert {call.callee for call in program.calls} >= {
+        "app.Logger.run",
+        "app.ShellExecutor.run",
+    }
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert findings[0].confidence == "probable"
+
+
 def test_partial_project_reports_syntax_error_and_keeps_scanning(tmp_path: Path) -> None:
     _write_files(
         tmp_path,

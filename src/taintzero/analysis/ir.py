@@ -68,6 +68,7 @@ class CallSite:
     keyword_arguments: tuple[tuple[str | None, str], ...] = ()
     keyword_values: tuple[tuple[str, object], ...] = ()
     receiver_node: str | None = None
+    possible_dispatch: bool = False
 
     @property
     def argument_nodes(self) -> tuple[str, ...]:
@@ -86,6 +87,7 @@ class ProgramIR:
     imports: dict[str, dict[str, str]] = field(default_factory=dict)
     module_environments: dict[str, dict[str, str]] = field(default_factory=dict)
     inferred_types: dict[str, str] = field(default_factory=dict)
+    possible_types: dict[str, frozenset[str]] = field(default_factory=dict)
     diagnostics: tuple[str, ...] = ()
 
     def add_node(self, node: FlowNode) -> str:
@@ -95,3 +97,9 @@ class ProgramIR:
     def add_edge(self, source: str, target: str, kind: str) -> None:
         if source != target:
             self.edges.append(FlowEdge(source=source, target=target, kind=kind))
+
+    def types_of(self, node: str) -> frozenset[str]:
+        if node in self.possible_types:
+            return self.possible_types[node]
+        inferred = self.inferred_types.get(node)
+        return frozenset((inferred,)) if inferred is not None else frozenset()

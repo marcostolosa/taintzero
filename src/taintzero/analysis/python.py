@@ -225,7 +225,11 @@ class _FunctionBuilder:
             if source.binding == "module"
             else program.module_environments.get(source.module, {}).copy()
         )
-        self.node_types = program.inferred_types.copy()
+        self.node_types = {
+            node: frozenset(types) for node, types in program.possible_types.items()
+        }
+        for node, inferred_type in program.inferred_types.items():
+            self.node_types.setdefault(node, frozenset((inferred_type,)))
         self.object_ids: dict[str, str] = {}
         self.fields: dict[str, str] = {}
         self.counter = 0
@@ -245,7 +249,7 @@ class _FunctionBuilder:
             self.object_ids[node] = node
             inferred_type = self._parameter_type(argument, position)
             if inferred_type:
-                self.node_types[node] = inferred_type
+                self.node_types[node] = frozenset((inferred_type,))
             parameter_nodes.append(node)
         if self.source.node.args.vararg:
             argument = self.source.node.args.vararg
@@ -269,7 +273,14 @@ class _FunctionBuilder:
             binding=self.source.binding,
         )
         self._statements(self.source.node.body)
-        self.program.inferred_types.update(self.node_types)
+        self.program.possible_types.update(self.node_types)
+        self.program.inferred_types.update(
+            {
+                node: next(iter(types))
+                for node, types in self.node_types.items()
+                if len(types) == 1
+            }
+        )
         if self.source.binding == "module":
             self.program.module_environments[self.source.module] = self.environment.copy()
 
@@ -371,14 +382,12 @@ class _FunctionBuilder:
                 for candidate in sorted(candidates):
                     self.program.add_edge(candidate, phi, "phi")
                 candidate_types = {
-                    self.node_types[candidate]
+                    inferred_type
                     for candidate in candidates
-                    if candidate in self.node_types
+                    for inferred_type in self.node_types.get(candidate, ())
                 }
-                if len(candidate_types) == 1 and all(
-                    candidate in self.node_types for candidate in candidates
-                ):
-                    self.node_types[phi] = next(iter(candidate_types))
+                if candidate_types:
+                    self.node_types[phi] = frozenset(candidate_types)
                 self.environment[name] = phi
         for access_path in sorted(
             set().union(*(outcome.keys() for outcome in field_outcomes))
@@ -395,14 +404,12 @@ class _FunctionBuilder:
                 for candidate in sorted(candidates):
                     self.program.add_edge(candidate, phi, "phi")
                 candidate_types = {
-                    self.node_types[candidate]
+                    inferred_type
                     for candidate in candidates
-                    if candidate in self.node_types
+                    for inferred_type in self.node_types.get(candidate, ())
                 }
-                if len(candidate_types) == 1 and all(
-                    candidate in self.node_types for candidate in candidates
-                ):
-                    self.node_types[phi] = next(iter(candidate_types))
+                if candidate_types:
+                    self.node_types[phi] = frozenset(candidate_types)
                 self.fields[access_path] = phi
         return True
 
@@ -436,7 +443,9 @@ class _FunctionBuilder:
         if isinstance(node, ast.Constant):
             result = self._node("literal", node, repr(node.value))
             if isinstance(node.value, (str, bytes, int, float, bool)):
-                self.node_types[result] = f"builtins.{type(node.value).__name__}"
+                self.node_types[result] = frozenset(
+                    (f"builtins.{type(node.value).__name__}",)
+                )
             return result
         if isinstance(node, ast.Call):
             return self._call(node)
@@ -453,8 +462,15 @@ class _FunctionBuilder:
         if isinstance(node, ast.IfExp):
             self._expression(node.test)
             result = self._node("expression", node, "conditional")
-            self.program.add_edge(self._expression(node.body), result, "branch")
-            self.program.add_edge(self._expression(node.orelse), result, "branch")
+            body = self._expression(node.body)
+            otherwise = self._expression(node.orelse)
+            self.program.add_edge(body, result, "branch")
+            self.program.add_edge(otherwise, result, "branch")
+            possible_types = self.node_types.get(body, frozenset()) | self.node_types.get(
+                otherwise, frozenset()
+            )
+            if possible_types:
+                self.node_types[result] = possible_types
             return result
 
         result = self._node("expression", node, type(node).__name__)
@@ -465,15 +481,23 @@ class _FunctionBuilder:
                 children.append(child_node)
                 self.program.add_edge(child_node, result, "expression")
         if isinstance(node, ast.JoinedStr):
-            self.node_types[result] = "builtins.str"
+            self.node_types[result] = frozenset(("builtins.str",))
         elif isinstance(node, ast.Dict):
-            self.node_types[result] = "builtins.dict"
+            self.node_types[result] = frozenset(("builtins.dict",))
         elif isinstance(node, (ast.List, ast.ListComp)):
-            self.node_types[result] = "builtins.list"
+            self.node_types[result] = frozenset(("builtins.list",))
         elif isinstance(node, ast.BinOp):
-            child_types = {self.node_types[item] for item in children if item in self.node_types}
-            if children and all(item in self.node_types for item in children) and len(child_types) == 1:
-                self.node_types[result] = next(iter(child_types))
+            child_types = {
+                inferred_type
+                for item in children
+                for inferred_type in self.node_types.get(item, ())
+            }
+            if (
+                children
+                and all(item in self.node_types for item in children)
+                and len(child_types) == 1
+            ):
+                self.node_types[result] = frozenset(child_types)
         return result
 
     def _subscript(self, node: ast.Subscript) -> str:
@@ -484,7 +508,7 @@ class _FunctionBuilder:
         result = self._node("call_result", node, f"{callee}()", callee)
         self.object_ids[result] = result
         if callee in EXTERNAL_RETURN_TYPES:
-            self.node_types[result] = EXTERNAL_RETURN_TYPES[callee]
+            self.node_types[result] = frozenset((EXTERNAL_RETURN_TYPES[callee],))
         self.program.calls.append(
             CallSite(
                 callee=callee,
@@ -507,13 +531,19 @@ class _FunctionBuilder:
         receiver = (
             self._expression(node.func.value) if isinstance(node.func, ast.Attribute) else None
         )
-        receiver_type = self.node_types.get(receiver) if receiver else None
-        if receiver_type and isinstance(node.func, ast.Attribute):
-            callee = self._resolve_method(receiver_type, node.func.attr) or (
-                f"{receiver_type}.{node.func.attr}"
+        receiver_types = self.node_types.get(receiver, frozenset()) if receiver else frozenset()
+        if receiver_types and isinstance(node.func, ast.Attribute):
+            callees = tuple(
+                sorted(
+                    {
+                        self._resolve_method(receiver_type, node.func.attr)
+                        or f"{receiver_type}.{node.func.attr}"
+                        for receiver_type in receiver_types
+                    }
+                )
             )
         else:
-            callee = self._resolve_name(raw_callee)
+            callees = (self._resolve_name(raw_callee),)
         positional_arguments = tuple(self._expression(argument) for argument in node.args)
         keyword_arguments = tuple(
             (keyword.arg, self._expression(keyword.value)) for keyword in node.keywords
@@ -523,23 +553,37 @@ class _FunctionBuilder:
             for keyword in node.keywords
             if keyword.arg is not None and isinstance(keyword.value, ast.Constant)
         )
-        result = self._node("call_result", node, f"{callee}()", callee)
-        if callee in self.program.classes:
-            self.node_types[result] = callee
-        elif callee in EXTERNAL_RETURN_TYPES:
-            self.node_types[result] = EXTERNAL_RETURN_TYPES[callee]
-        self.program.calls.append(
-            CallSite(
-                callee=callee,
-                scope=self.source.symbol,
-                location=self._location(node),
-                result_node=result,
-                positional_arguments=positional_arguments,
-                keyword_arguments=keyword_arguments,
-                keyword_values=keyword_values,
-                receiver_node=receiver,
+        symbol = callees[0] if len(callees) == 1 else raw_callee
+        result = self._node("call_result", node, f"{symbol}()", symbol)
+        self.object_ids[result] = result
+        return_types = {
+            return_type
+            for callee in callees
+            for return_type in (
+                (callee,) if callee in self.program.classes else ()
             )
+        }
+        return_types.update(
+            EXTERNAL_RETURN_TYPES[callee]
+            for callee in callees
+            if callee in EXTERNAL_RETURN_TYPES
         )
+        if return_types:
+            self.node_types[result] = frozenset(return_types)
+        for callee in callees:
+            self.program.calls.append(
+                CallSite(
+                    callee=callee,
+                    scope=self.source.symbol,
+                    location=self._location(node),
+                    result_node=result,
+                    positional_arguments=positional_arguments,
+                    keyword_arguments=keyword_arguments,
+                    keyword_values=keyword_values,
+                    receiver_node=receiver,
+                    possible_dispatch=len(callees) > 1,
+                )
+            )
         return result
 
     def _resolve_name(self, name: str) -> str:
@@ -615,6 +659,7 @@ def _connect_calls(program: ProgramIR) -> None:
         function = program.functions.get(call.callee)
         if function is None:
             continue
+        edge_prefix = "possible_" if call.possible_dispatch else ""
         parameter_offset = 0
         if (
             call.receiver_node
@@ -622,7 +667,9 @@ def _connect_calls(program: ProgramIR) -> None:
             and function.parameter_nodes
         ):
             program.add_edge(
-                call.receiver_node, function.parameter_nodes[0], "receiver_to_parameter"
+                call.receiver_node,
+                function.parameter_nodes[0],
+                f"{edge_prefix}receiver_to_parameter",
             )
             parameter_offset = 1
         for argument, parameter in zip(
@@ -630,9 +677,17 @@ def _connect_calls(program: ProgramIR) -> None:
             function.parameter_nodes[parameter_offset:],
             strict=False,
         ):
-            program.add_edge(argument, parameter, "argument_to_parameter")
+            program.add_edge(argument, parameter, f"{edge_prefix}argument_to_parameter")
         parameters = dict(zip(function.parameters, function.parameter_nodes, strict=True))
         for name, argument in call.keyword_arguments:
             if name in parameters:
-                program.add_edge(argument, parameters[name], "keyword_to_parameter")
-        program.add_edge(function.return_node, call.result_node, "return_to_call")
+                program.add_edge(
+                    argument,
+                    parameters[name],
+                    f"{edge_prefix}keyword_to_parameter",
+                )
+        program.add_edge(
+            function.return_node,
+            call.result_node,
+            f"{edge_prefix}return_to_call",
+        )
