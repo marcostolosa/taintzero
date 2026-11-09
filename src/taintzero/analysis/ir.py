@@ -41,6 +41,23 @@ class FlowEdge:
 
 
 @dataclass(frozen=True)
+class ObjectAlias:
+    source: str
+    target: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class FieldAccess:
+    node: str
+    receiver: str
+    attribute: str
+    mode: str
+    scope: str
+    location: Location
+
+
+@dataclass(frozen=True)
 class FunctionIR:
     symbol: str
     location: Location
@@ -84,6 +101,8 @@ class ProgramIR:
     classes: dict[str, ClassIR] = field(default_factory=dict)
     defined_symbols: set[str] = field(default_factory=set)
     calls: list[CallSite] = field(default_factory=list)
+    object_aliases: list[ObjectAlias] = field(default_factory=list)
+    field_accesses: list[FieldAccess] = field(default_factory=list)
     imports: dict[str, dict[str, str]] = field(default_factory=dict)
     module_environments: dict[str, dict[str, str]] = field(default_factory=dict)
     inferred_types: dict[str, str] = field(default_factory=dict)
@@ -97,6 +116,10 @@ class ProgramIR:
     def add_edge(self, source: str, target: str, kind: str) -> None:
         if source != target:
             self.edges.append(FlowEdge(source=source, target=target, kind=kind))
+
+    def add_alias(self, source: str, target: str, kind: str) -> None:
+        if source != target:
+            self.object_aliases.append(ObjectAlias(source, target, kind))
 
     def types_of(self, node: str) -> frozenset[str]:
         if node in self.possible_types:

@@ -225,6 +225,11 @@ command/code injection, XSS, SQLi, SSRF, path traversal, desserialização inseg
 condicional. A cobertura é por APIs modeladas; essa lista não implica cobertura integral de uma
 categoria ou framework.
 
+Fluxos de atributos entre métodos são conectados quando receiver, callsite e definição são únicos.
+Essas arestas recebem confiança `probable`. Contextos com múltiplos callsites ou definições não são
+combinados por suposição: aparecem em `diagnostics` como `heap-context-ambiguous` ou
+`heap-definitions-ambiguous`.
+
 Renderizar o grafo opcionalmente com Graphviz:
 
 ```bash
@@ -319,6 +324,7 @@ taintzero providers
 
 - a cobertura do motor nativo depende das construções Python e APIs atualmente modeladas;
 - dispatch altamente dinâmico e extensões nativas podem exigir modelos adicionais;
+- heap entre métodos ainda exige contexto e definição únicos; ambiguidades são diagnosticadas;
 - detecção de frameworks depende de manifests e sinais estáticos;
 - `auto` requer acesso ao Semgrep Registry e os perfis baixáveis requerem Git no primeiro uso;
 - a triagem depende da qualidade da regra, do contexto e do modelo selecionado.

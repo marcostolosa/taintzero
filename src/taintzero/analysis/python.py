@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ast
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from .ir import CallSite, ClassIR, FlowNode, FunctionIR, Location, ProgramIR
+from .ir import CallSite, ClassIR, FieldAccess, FlowNode, FunctionIR, Location, ProgramIR
 
 
 class PythonAnalysisError(RuntimeError):
@@ -88,9 +89,10 @@ def index_python_project(root: Path) -> ProgramIR:
         _FunctionBuilder(program, source).build()
 
     _connect_calls(program)
+    _connect_heap_fields(program)
     if syntax_errors:
         # Partial projects are intentionally accepted and diagnostics remain machine-readable.
-        program.diagnostics = tuple(syntax_errors)
+        program.diagnostics = (*program.diagnostics, *syntax_errors)
     return program
 
 
@@ -303,7 +305,10 @@ class _FunctionBuilder:
                 self.program.add_edge(value, expression, "operand")
                 self._assign(statement.target, expression)
             elif isinstance(statement, ast.Return) and statement.value is not None:
-                self.program.add_edge(self._expression(statement.value), self.return_node, "return")
+                value = self._expression(statement.value)
+                self.program.add_edge(value, self.return_node, "return")
+                if value in self.object_ids:
+                    self.program.add_alias(value, self.return_node, "return")
                 return False
             elif isinstance(statement, ast.Return):
                 return False
@@ -422,10 +427,21 @@ class _FunctionBuilder:
             destination = self._variable(target.id, target, "variable")
             self.environment[target.id] = destination
         elif isinstance(target, ast.Attribute):
-            access_path = self._attribute_path(target)
+            receiver = self._expression(target.value)
+            access_path = self._attribute_path(receiver, target.attr)
             destination = self._node("field", target, access_path or target.attr)
             if access_path is not None:
                 self.fields[access_path] = destination
+            self.program.field_accesses.append(
+                FieldAccess(
+                    node=destination,
+                    receiver=receiver,
+                    attribute=target.attr,
+                    mode="write",
+                    scope=self.source.symbol,
+                    location=self._location(target),
+                )
+            )
         else:
             destination = self._node("field", target, _expression_name(target) or "field")
         if value is not None:
@@ -433,6 +449,8 @@ class _FunctionBuilder:
             if value in self.node_types:
                 self.node_types[destination] = self.node_types[value]
             self.object_ids[destination] = self.object_ids.get(value, value)
+            if isinstance(target, ast.Name) and value in self.object_ids:
+                self.program.add_alias(value, destination, "assignment")
 
     def _expression(self, node: ast.expr) -> str:
         if isinstance(node, ast.Name):
@@ -450,9 +468,29 @@ class _FunctionBuilder:
         if isinstance(node, ast.Call):
             return self._call(node)
         if isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load):
-            access_path = self._attribute_path(node)
-            if access_path is not None and access_path in self.fields:
-                return self.fields[access_path]
+            receiver = self._expression(node.value)
+            access_path = self._attribute_path(receiver, node.attr)
+            result = self._node("field_read", node, access_path, node.attr)
+            self.program.field_accesses.append(
+                FieldAccess(
+                    node=result,
+                    receiver=receiver,
+                    attribute=node.attr,
+                    mode="read",
+                    scope=self.source.symbol,
+                    location=self._location(node),
+                )
+            )
+            if access_path in self.fields:
+                stored = self.fields[access_path]
+                self.program.add_edge(stored, result, "field_store_to_load")
+                if stored in self.node_types:
+                    self.node_types[result] = self.node_types[stored]
+                if stored in self.object_ids:
+                    self.object_ids[result] = self.object_ids[stored]
+            else:
+                self.program.add_edge(receiver, result, "attribute")
+            return result
         if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
             return self._subscript(node)
         if isinstance(node, ast.NamedExpr):
@@ -521,10 +559,9 @@ class _FunctionBuilder:
         )
         return result
 
-    def _attribute_path(self, node: ast.Attribute) -> str | None:
-        receiver = self._expression(node.value)
+    def _attribute_path(self, receiver: str, attribute: str) -> str:
         identity = self.object_ids.get(receiver, receiver)
-        return f"{identity}.{node.attr}"
+        return f"{identity}.{attribute}"
 
     def _call(self, node: ast.Call) -> str:
         raw_callee = _expression_name(node.func) or "<dynamic>"
@@ -655,10 +692,14 @@ def _expression_name(node: ast.AST) -> str | None:
 
 
 def _connect_calls(program: ProgramIR) -> None:
+    incoming = Counter(
+        call.callee for call in program.calls if call.callee in program.functions
+    )
     for call in program.calls:
         function = program.functions.get(call.callee)
         if function is None:
             continue
+        unique_context = incoming[call.callee] == 1 and not call.possible_dispatch
         edge_prefix = "possible_" if call.possible_dispatch else ""
         parameter_offset = 0
         if (
@@ -671,6 +712,12 @@ def _connect_calls(program: ProgramIR) -> None:
                 function.parameter_nodes[0],
                 f"{edge_prefix}receiver_to_parameter",
             )
+            if unique_context:
+                program.add_alias(
+                    call.receiver_node,
+                    function.parameter_nodes[0],
+                    "receiver_binding",
+                )
             parameter_offset = 1
         for argument, parameter in zip(
             call.positional_arguments,
@@ -678,6 +725,8 @@ def _connect_calls(program: ProgramIR) -> None:
             strict=False,
         ):
             program.add_edge(argument, parameter, f"{edge_prefix}argument_to_parameter")
+            if unique_context:
+                program.add_alias(argument, parameter, "parameter_binding")
         parameters = dict(zip(function.parameters, function.parameter_nodes, strict=True))
         for name, argument in call.keyword_arguments:
             if name in parameters:
@@ -686,8 +735,118 @@ def _connect_calls(program: ProgramIR) -> None:
                     parameters[name],
                     f"{edge_prefix}keyword_to_parameter",
                 )
+                if unique_context:
+                    program.add_alias(argument, parameters[name], "keyword_binding")
         program.add_edge(
             function.return_node,
             call.result_node,
             f"{edge_prefix}return_to_call",
         )
+        if unique_context:
+            program.add_alias(function.return_node, call.result_node, "return_binding")
+
+
+def _connect_heap_fields(program: ProgramIR) -> None:
+    """Connect field stores to loads only when object identity and context are unique.
+
+    This is a deliberately bounded first heap-SSA stage. Ambiguous call contexts and multiple
+    reaching definitions produce diagnostics instead of speculative edges.
+    """
+    diagnostics = set(program.diagnostics)
+    incoming_calls: dict[str, list[CallSite]] = {}
+    for call in program.calls:
+        if call.callee in program.functions:
+            incoming_calls.setdefault(call.callee, []).append(call)
+    unique_calls = {
+        symbol: calls[0]
+        for symbol, calls in incoming_calls.items()
+        if len(calls) == 1 and not calls[0].possible_dispatch
+    }
+
+    parents: dict[str, str] = {}
+
+    def find(node: str) -> str:
+        parent = parents.setdefault(node, node)
+        if parent != node:
+            parents[node] = find(parent)
+        return parents[node]
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root == right_root:
+            return
+        if left_root < right_root:
+            parents[right_root] = left_root
+        else:
+            parents[left_root] = right_root
+
+    for alias in program.object_aliases:
+        union(alias.source, alias.target)
+
+    def effective_context(
+        access: FieldAccess,
+    ) -> tuple[str, tuple[tuple[str, int, int], ...]] | None:
+        scope = access.scope
+        call_chain: list[tuple[str, int, int]] = []
+        visited: set[str] = set()
+        while scope in incoming_calls:
+            if scope in visited:
+                diagnostics.add(f"heap-context-cycle:{scope}")
+                return None
+            if scope not in unique_calls:
+                diagnostics.add(
+                    f"heap-context-ambiguous:{scope}:calls={len(incoming_calls[scope])}"
+                )
+                return None
+            visited.add(scope)
+            call = unique_calls[scope]
+            call_chain.append(
+                (call.location.path, call.location.line, call.location.col)
+            )
+            scope = call.scope
+        call_chain.reverse()
+        call_chain.append(
+            (access.location.path, access.location.line, access.location.col)
+        )
+        return scope, tuple(call_chain)
+
+    writes: list[
+        tuple[FieldAccess, str, tuple[str, tuple[tuple[str, int, int], ...]]]
+    ] = []
+    reads: list[
+        tuple[FieldAccess, str, tuple[str, tuple[tuple[str, int, int], ...]]]
+    ] = []
+    for access in program.field_accesses:
+        context = effective_context(access)
+        if context is None:
+            continue
+        item = (access, find(access.receiver), context)
+        if access.mode == "write":
+            writes.append(item)
+        else:
+            reads.append(item)
+
+    for read, receiver, (root_scope, read_order) in reads:
+        candidates = [
+            write
+            for write, write_receiver, (write_root, write_order) in writes
+            if write.scope != read.scope
+            and write.attribute == read.attribute
+            and write_receiver == receiver
+            and write_root == root_scope
+            and write_order < read_order
+        ]
+        if len(candidates) == 1:
+            program.add_edge(
+                candidates[0].node,
+                read.node,
+                "possible_field_store_to_load",
+            )
+        elif len(candidates) > 1:
+            diagnostics.add(
+                "heap-definitions-ambiguous:"
+                f"{read.location.path}:{read.location.line}:{read.attribute}:"
+                f"definitions={len(candidates)}"
+            )
+    program.diagnostics = tuple(sorted(diagnostics))
