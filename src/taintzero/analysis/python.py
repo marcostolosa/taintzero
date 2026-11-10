@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import ast
-from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -763,7 +762,11 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
     field_scopes = {access.scope for access in program.field_accesses}
     incoming: dict[str, list[CallSite]] = {}
     for call in base_calls:
-        if call.callee in base_functions and not call.possible_dispatch:
+        if (
+            call.callee in base_functions
+            and not call.possible_dispatch
+            and call.scope != call.callee
+        ):
             incoming.setdefault(call.callee, []).append(call)
 
     targets = [
@@ -780,12 +783,11 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
     def clone_function(
         symbol: str,
         context_id: str,
-        stack: tuple[str, ...],
+        context_map: dict[str, str],
         depth: int,
     ) -> str | None:
-        if symbol in stack:
-            diagnostics.add(f"heap-context-recursion:{symbol}")
-            return None
+        if symbol in context_map:
+            return context_map[symbol]
         if depth > MAX_CONTEXT_DEPTH:
             diagnostics.add(
                 f"heap-context-depth-exceeded:{symbol}:limit={MAX_CONTEXT_DEPTH}"
@@ -795,6 +797,7 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
         if function is None:
             return None
         context_symbol = f"{symbol}@{context_id}"
+        context_map = {**context_map, symbol: context_symbol}
         node_map: dict[str, str] = {}
         for node_id in function.node_ids:
             original = program.nodes[node_id]
@@ -879,10 +882,7 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
                     )
                 else:
                     nested_context = clone_function(
-                        inner.callee,
-                        nested_id,
-                        (*stack, symbol),
-                        depth + 1,
+                        inner.callee, nested_id, context_map, depth + 1
                     )
                 cloned = replace(
                     cloned,
@@ -902,7 +902,7 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
             context_id = (
                 f"{call.location.path}:{call.location.line}:{call.location.col}:{ordinal}"
             )
-            context_symbol = clone_function(symbol, context_id, (), 1)
+            context_symbol = clone_function(symbol, context_id, {}, 1)
             if context_symbol is not None:
                 updated_incoming[id(call)] = replace(
                     call, context_function=context_symbol
@@ -940,17 +940,18 @@ def _specialize_heap_contexts(program: ProgramIR) -> None:
 
 
 def _connect_calls(program: ProgramIR) -> None:
-    incoming = Counter(
-        _call_target(call)
-        for call in program.calls
-        if _call_target(call) in program.functions
-    )
+    incoming: dict[str, list[CallSite]] = {}
+    for call in program.calls:
+        target = _call_target(call)
+        if target in program.functions:
+            incoming.setdefault(target, []).append(call)
     for call in program.calls:
         target = _call_target(call)
         function = program.functions.get(target)
         if function is None:
             continue
-        unique_context = incoming[target] == 1 and not call.possible_dispatch
+        external_calls = [item for item in incoming[target] if item.scope != target]
+        unique_context = len(external_calls) == 1 and not call.possible_dispatch
         edge_prefix = "possible_" if call.possible_dispatch else ""
         parameter_offset = 0
         if (
@@ -1010,9 +1011,12 @@ def _connect_heap_fields(program: ProgramIR) -> None:
         if target in program.functions:
             incoming_calls.setdefault(target, []).append(call)
     unique_calls = {
-        symbol: calls[0]
+        symbol: external_calls[0]
         for symbol, calls in incoming_calls.items()
-        if len(calls) == 1 and not calls[0].possible_dispatch
+        if len(
+            external_calls := [call for call in calls if call.scope != symbol]
+        ) == 1
+        and not external_calls[0].possible_dispatch
     }
 
     parents: dict[str, str] = {}

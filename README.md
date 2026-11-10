@@ -227,7 +227,7 @@ categoria ou framework.
 
 Fluxos de atributos entre métodos são conectados por identidade de objeto. Funções chamadas mais de
 uma vez têm nós e parâmetros clonados por callsite; helpers internos também são expandidos no mesmo
-contexto, até profundidade 4. Essas arestas recebem confiança `probable`. Recursão, profundidade
+contexto, até profundidade 4. Recursão no mesmo contexto converge pelo solver; profundidade
 excedida, dispatch interno ambíguo e múltiplas definições aparecem em `diagnostics`, sem fallback
 silencioso para summaries compartilhados. Definições de atributos em branches comuns são fundidas
 por `phi` antes de cruzar métodos, preservando alternativas tainted e sanitizadas.
@@ -326,8 +326,8 @@ taintzero providers
 
 - a cobertura do motor nativo depende das construções Python e APIs atualmente modeladas;
 - dispatch altamente dinâmico e extensões nativas podem exigir modelos adicionais;
-- heap multi-call expande helpers internos até profundidade 4; recursão e dispatch ambíguo ainda
-  exigem summaries com fixpoint;
+- heap multi-call expande helpers internos até profundidade 4; ciclos recursivos no mesmo contexto
+  são resolvidos, enquanto recursão profunda e dispatch ambíguo são diagnosticados;
 - detecção de frameworks depende de manifests e sinais estáticos;
 - `auto` requer acesso ao Semgrep Registry e os perfis baixáveis requerem Git no primeiro uso;
 - a triagem depende da qualidade da regra, do contexto e do modelo selecionado.

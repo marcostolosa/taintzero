@@ -261,16 +261,18 @@ def test_nested_contexts_do_not_cross_contaminate_instances(tmp_path: Path) -> N
     assert analyze_taint(index_python_project(tmp_path)) == []
 
 
-def test_recursive_context_expansion_is_blocked_and_diagnosed(tmp_path: Path) -> None:
+def test_terminating_recursive_context_reaches_sink(tmp_path: Path) -> None:
     _write_app(
         tmp_path,
         "import os\n"
         "from flask import request\n"
-        "def normalize(value):\n"
-        "    return normalize(value)\n"
+        "def normalize(value, depth):\n"
+        "    if depth <= 0:\n"
+        "        return value\n"
+        "    return normalize(value, depth - 1)\n"
         "class Holder:\n"
         "    def set_command(self, value):\n"
-        "        self.command = normalize(value)\n"
+        "        self.command = normalize(value, 1)\n"
         "    def run(self):\n"
         "        os.system(self.command)\n"
         "def route():\n"
@@ -282,9 +284,11 @@ def test_recursive_context_expansion_is_blocked_and_diagnosed(tmp_path: Path) ->
     )
 
     program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
 
-    assert analyze_taint(program) == []
-    assert "heap-context-recursion:app.normalize" in program.diagnostics
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert findings[0].confidence == "probable"
+    assert "heap-context-recursion:app.normalize" not in program.diagnostics
 
 
 def test_context_expansion_depth_is_bounded_and_diagnosed(tmp_path: Path) -> None:
