@@ -161,6 +161,113 @@ def test_heap_phi_with_sanitized_branches_is_safe(tmp_path: Path) -> None:
     assert not any(diagnostic.startswith("heap-") for diagnostic in program.diagnostics)
 
 
+def test_heap_phi_connects_loop_body_to_method_load(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "class Holder:\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route(values):\n"
+        "    holder = Holder()\n"
+        "    holder.command = 'constant'\n"
+        "    for value in values:\n"
+        "        holder.command = request.args.get('command')\n"
+        "    holder.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert any(step.node.kind == "phi" for step in findings[0].trace)
+
+
+def test_heap_phi_connects_while_body_to_method_load(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "class Holder:\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route(flag):\n"
+        "    holder = Holder()\n"
+        "    holder.command = 'constant'\n"
+        "    while flag:\n"
+        "        holder.command = request.args.get('command')\n"
+        "        flag = False\n"
+        "    holder.run()\n",
+    )
+
+    findings = analyze_taint(index_python_project(tmp_path))
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert any(step.node.kind == "phi" for step in findings[0].trace)
+
+
+def test_heap_phi_merges_try_and_except_field_definitions(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "class Holder:\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route():\n"
+        "    holder = Holder()\n"
+        "    holder.command = 'constant'\n"
+        "    try:\n"
+        "        holder.command = request.args.get('command')\n"
+        "    except RuntimeError:\n"
+        "        holder.command = 'fallback'\n"
+        "    holder.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert any(step.node.kind == "phi" for step in findings[0].trace)
+
+
+def test_mutual_recursive_helpers_keep_context_isolated(tmp_path: Path) -> None:
+    _write_app(
+        tmp_path,
+        "import os\n"
+        "from flask import request\n"
+        "def normalize_a(value, depth):\n"
+        "    if depth <= 0:\n"
+        "        return value\n"
+        "    return normalize_b(value, depth - 1)\n"
+        "def normalize_b(value, depth):\n"
+        "    if depth <= 0:\n"
+        "        return value\n"
+        "    return normalize_a(value, depth - 1)\n"
+        "class Holder:\n"
+        "    def set_command(self, value):\n"
+        "        self.command = normalize_a(value, 2)\n"
+        "    def run(self):\n"
+        "        os.system(self.command)\n"
+        "def route():\n"
+        "    first = Holder()\n"
+        "    second = Holder()\n"
+        "    first.set_command(request.args.get('command'))\n"
+        "    second.set_command('constant')\n"
+        "    first.run()\n",
+    )
+
+    program = index_python_project(tmp_path)
+    findings = analyze_taint(program)
+
+    assert [finding.vulnerability for finding in findings] == ["command-injection"]
+    assert not any(
+        diagnostic.startswith("heap-context-depth-exceeded:")
+        for diagnostic in program.diagnostics
+    )
+
+
 def test_multiple_setter_calls_are_specialized_by_instance(tmp_path: Path) -> None:
     _write_app(
         tmp_path,

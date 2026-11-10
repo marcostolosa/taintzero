@@ -229,8 +229,9 @@ Fluxos de atributos entre métodos são conectados por identidade de objeto. Fun
 uma vez têm nós e parâmetros clonados por callsite; helpers internos também são expandidos no mesmo
 contexto, até profundidade 4. Recursão no mesmo contexto converge pelo solver; profundidade
 excedida, dispatch interno ambíguo e múltiplas definições aparecem em `diagnostics`, sem fallback
-silencioso para summaries compartilhados. Definições de atributos em branches comuns são fundidas
-por `phi` antes de cruzar métodos, preservando alternativas tainted e sanitizadas.
+silencioso para summaries compartilhados. Definições de atributos em branches, loops comuns e
+`try/except` são fundidas por `phi` antes de cruzar métodos, preservando alternativas tainted e
+sanitizadas; recursão mútua limitada usa o mesmo contexto.
 
 Renderizar o grafo opcionalmente com Graphviz:
 
